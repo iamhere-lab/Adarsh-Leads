@@ -1,0 +1,17 @@
+User-Agent: *
+Allow: /
+Allow: /_next/image
+Disallow: /thank-you/
+Disallow: /search/
+Disallow: /api/
+Disallow: /brochures/
+Disallow: /*?*
+
+User-Agent: GPTBot
+User-Agent: PerplexityBot
+User-Agent: ClaudeBot
+User-Agent: Google-Extended
+Allow: /
+
+Host: https://adarshprojects.com/
+Sitemap: https://adarshprojects.com/sitemap.xml
