@@ -62,21 +62,44 @@
     return otpReady;
   }
   function otpEnabled() { return !!(CONFIG.MSG91_WIDGET_ID && CONFIG.MSG91_TOKEN_AUTH); }
+  var captchaHome = null; // the form that holds the captcha
   function captchaBox(form) {
     var cap = document.getElementById("msg91-captcha");
-    if (!cap) { cap = document.createElement("div"); cap.id = "msg91-captcha"; }
-    var btn = form.querySelector("button");
-    if (cap.parentNode !== form) form.insertBefore(cap, btn);
+    if (!cap) { cap = document.createElement("div"); cap.id = "msg91-captcha"; cap.className = "otp-captcha"; }
+    // Only move it before the widget has drawn into it (moving a drawn captcha breaks it)
+    if (!captchaHome || !cap.hasChildNodes()) {
+      var btn = form.querySelector("button");
+      if (cap.parentNode !== form) form.insertBefore(cap, btn);
+      captchaHome = form;
+    }
     return cap;
   }
+  function captchaNeeded() { return typeof window.isCaptchaVerified === "function" && !window.isCaptchaVerified(); }
+  // Resolves once the visitor has ticked the captcha (or at once if the widget has no captcha)
+  function waitForCaptcha(form, onWaiting) {
+    return new Promise(function (resolve, reject) {
+      if (!captchaNeeded()) return resolve();
+      var cap = captchaBox(form);
+      onWaiting(captchaHome === form
+        ? "Tick the security check above to get your OTP."
+        : "Tick the security check in the form where it appears, then press the button there.");
+      cap.scrollIntoView({ behavior: "smooth", block: "center" });
+      var waited = 0;
+      (function poll() {
+        if (!captchaNeeded()) return resolve();
+        if ((waited += 400) > 180000) return reject(new Error("The security check timed out. Please try again."));
+        setTimeout(poll, 400);
+      })();
+    });
+  }
   // Ask for the OTP inside the form; resolves with the MSG91 access token.
-  function runOtp(form, phone) {
+  function runOtp(form, phone, onWaiting) {
     captchaBox(form); // captcha (if enabled on the widget) renders inside this form
-    return loadOtpWidget().then(function () {
+    return loadOtpWidget()
+      .then(function () { return waitForCaptcha(form, onWaiting); })
+      .then(function () {
       return new Promise(function (resolve, reject) {
-        if (typeof window.isCaptchaVerified === "function" && !window.isCaptchaVerified()) {
-          return reject(new Error("Please complete the captcha above, then press the button again."));
-        }
+        onWaiting("");
         window.sendOtp("91" + phone, function (data) {
           console.info("[msg91] OTP sent", data);
           var box = document.createElement("div");
@@ -110,7 +133,7 @@
           reject(new Error(msgOf(e) || "MSG91 did not send the OTP."));
         });
       });
-    });
+      });
   }
 
   /* ---------------- Lead forms ---------------- */
@@ -122,6 +145,19 @@
       err.hidden = true;
       var btn = form.querySelector("button");
       form.insertBefore(err, btn);
+      var note = document.createElement("p");
+      note.className = "text-sm otp-note";
+      note.hidden = true;
+      form.insertBefore(note, btn);
+      var setNote = function (msg) { note.textContent = msg; note.hidden = !msg; };
+
+      // Load the OTP widget as soon as the visitor starts filling the form,
+      // so any security check is already on screen before they press the button.
+      form.addEventListener("focusin", function () {
+        if (!otpEnabled()) return;
+        captchaBox(form);
+        loadOtpWidget().catch(function (e) { console.warn("[msg91] preload failed", e); });
+      }, { once: true });
 
       form.addEventListener("submit", function (e) {
         e.preventDefault();
@@ -170,7 +206,8 @@
         };
         if (otpEnabled()) {
           btn.textContent = "Sending OTP…";
-          runOtp(form, phone).then(send).catch(function (e) {
+          runOtp(form, phone, setNote).then(send).catch(function (e) {
+            setNote("");
             btn.disabled = false;
             btn.textContent = "Verify mobile & continue";
             showErr("We could not send the OTP: " + ((e && e.message) || "unknown error") + " — or call us.");
