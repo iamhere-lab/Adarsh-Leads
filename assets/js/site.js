@@ -23,39 +23,62 @@
 
   /* ---------------- MSG91 OTP widget ---------------- */
   var otpReady = null;
+  function msgOf(x) {
+    if (!x) return "";
+    if (typeof x === "string") return x;
+    return x.message || x.msg || x.error || (x.type ? x.type : "") || JSON.stringify(x);
+  }
   function loadOtpWidget() {
     if (otpReady) return otpReady;
     otpReady = new Promise(function (resolve, reject) {
-      var cap = document.createElement("div");
-      cap.id = "msg91-captcha";
-      document.body.appendChild(cap);
+      if (window.location.protocol === "file:") return reject(new Error("Open the site through a web server (http://…), not by double-clicking the file."));
       var s = document.createElement("script");
       s.src = "https://verify.msg91.com/otp-provider.js";
       s.async = true;
       s.onload = function () {
+        if (typeof window.initSendOTP !== "function") return reject(new Error("MSG91 widget script loaded but initSendOTP is missing."));
         try {
           window.initSendOTP({
             widgetId: CONFIG.MSG91_WIDGET_ID,
             tokenAuth: CONFIG.MSG91_TOKEN_AUTH,
             exposeMethods: true,
             captchaRenderId: "msg91-captcha",
-            success: function () {},
-            failure: function () {},
+            success: function (d) { console.info("[msg91] success", d); },
+            failure: function (e) { console.warn("[msg91] failure", e); },
           });
-          resolve();
-        } catch (e) { reject(e); }
+        } catch (e) { return reject(e); }
+        // the widget attaches sendOtp/verifyOtp asynchronously — wait for them
+        var tries = 0;
+        (function wait() {
+          if (typeof window.sendOtp === "function" && typeof window.verifyOtp === "function") return resolve();
+          if (++tries > 50) return reject(new Error("MSG91 widget did not initialise. Check the Widget ID and Token."));
+          setTimeout(wait, 100);
+        })();
       };
-      s.onerror = reject;
+      s.onerror = function () { reject(new Error("Could not load the MSG91 widget script (blocked by an ad-blocker or network?).")); };
       document.head.appendChild(s);
     });
+    otpReady.catch(function () { otpReady = null; });
     return otpReady;
   }
   function otpEnabled() { return !!(CONFIG.MSG91_WIDGET_ID && CONFIG.MSG91_TOKEN_AUTH); }
+  function captchaBox(form) {
+    var cap = document.getElementById("msg91-captcha");
+    if (!cap) { cap = document.createElement("div"); cap.id = "msg91-captcha"; }
+    var btn = form.querySelector("button");
+    if (cap.parentNode !== form) form.insertBefore(cap, btn);
+    return cap;
+  }
   // Ask for the OTP inside the form; resolves with the MSG91 access token.
   function runOtp(form, phone) {
+    captchaBox(form); // captcha (if enabled on the widget) renders inside this form
     return loadOtpWidget().then(function () {
       return new Promise(function (resolve, reject) {
-        window.sendOtp("91" + phone, function () {
+        if (typeof window.isCaptchaVerified === "function" && !window.isCaptchaVerified()) {
+          return reject(new Error("Please complete the captcha above, then press the button again."));
+        }
+        window.sendOtp("91" + phone, function (data) {
+          console.info("[msg91] OTP sent", data);
           var box = document.createElement("div");
           box.className = "otp-box";
           box.innerHTML =
@@ -69,15 +92,23 @@
           var input = box.querySelector(".otp-input"), err = box.querySelector(".otp-err");
           input.focus();
           box.querySelector(".otp-verify").addEventListener("click", function () {
-            window.verifyOtp(input.value.trim(), function (data) {
-              resolve((data && (data.message || data.token)) || "");
-            }, function () { err.textContent = "Wrong or expired OTP. Try again."; err.hidden = false; });
+            window.verifyOtp(input.value.trim(), function (d) {
+              console.info("[msg91] verified", d);
+              resolve((d && (d.message || d.token || d["access-token"])) || "");
+            }, function (e) {
+              console.warn("[msg91] verify failed", e);
+              err.textContent = "Wrong or expired OTP. " + msgOf(e);
+              err.hidden = false;
+            });
           });
           box.querySelector(".otp-resend").addEventListener("click", function () {
             window.retryOtp(null, function () { err.textContent = "OTP sent again."; err.hidden = false; },
-              function () { err.textContent = "Could not resend. Please wait a minute."; err.hidden = false; });
+              function (e) { err.textContent = "Could not resend: " + msgOf(e); err.hidden = false; });
           });
-        }, function () { reject(new Error("send-failed")); });
+        }, function (e) {
+          console.warn("[msg91] sendOtp failed", e);
+          reject(new Error(msgOf(e) || "MSG91 did not send the OTP."));
+        });
       });
     });
   }
@@ -139,10 +170,10 @@
         };
         if (otpEnabled()) {
           btn.textContent = "Sending OTP…";
-          runOtp(form, phone).then(send).catch(function () {
+          runOtp(form, phone).then(send).catch(function (e) {
             btn.disabled = false;
-            btn.textContent = "Try again";
-            showErr("We could not send the OTP. Check the number or call us.");
+            btn.textContent = "Verify mobile & continue";
+            showErr("We could not send the OTP: " + ((e && e.message) || "unknown error") + " — or call us.");
           });
         } else {
           send("");
