@@ -13,6 +13,9 @@
     // Both values are safe to publish: the secret authkey stays in Apps Script.
     MSG91_WIDGET_ID: "366971686f50373435313031",
     MSG91_TOKEN_AUTH: "563888TYocxF1g6aaba1c3P1",
+    // "popup" = MSG91's own verification window (handles captcha itself — recommended)
+    // "inline" = OTP box inside our form (needs captcha OFF on the widget)
+    MSG91_MODE: "popup",
     // Optional: Google Tag Manager and Microsoft Clarity IDs
     GTM_ID: "",
     CLARITY_ID: "",
@@ -28,15 +31,50 @@
     if (typeof x === "string") return x;
     return x.message || x.msg || x.error || (x.type ? x.type : "") || JSON.stringify(x);
   }
-  function loadOtpWidget() {
-    if (otpReady) return otpReady;
-    otpReady = new Promise(function (resolve, reject) {
+  var scriptReady = null;
+  function loadOtpScript() {
+    if (scriptReady) return scriptReady;
+    scriptReady = new Promise(function (resolve, reject) {
       if (window.location.protocol === "file:") return reject(new Error("Open the site through a web server (http://…), not by double-clicking the file."));
       var s = document.createElement("script");
       s.src = "https://verify.msg91.com/otp-provider.js";
       s.async = true;
       s.onload = function () {
         if (typeof window.initSendOTP !== "function") return reject(new Error("MSG91 widget script loaded but initSendOTP is missing."));
+        resolve();
+      };
+      s.onerror = function () { reject(new Error("Could not load the MSG91 widget script (blocked by an ad-blocker or network?).")); };
+      document.head.appendChild(s);
+    });
+    scriptReady.catch(function () { scriptReady = null; });
+    return scriptReady;
+  }
+  // Popup mode: MSG91 shows its own window (number → captcha → OTP) and returns a token.
+  function runOtpPopup(phone, onWaiting) {
+    return loadOtpScript().then(function () {
+      return new Promise(function (resolve, reject) {
+        onWaiting("Complete the verification in the MSG91 window.");
+        window.initSendOTP({
+          widgetId: CONFIG.MSG91_WIDGET_ID,
+          tokenAuth: CONFIG.MSG91_TOKEN_AUTH,
+          identifier: "91" + phone,
+          exposeMethods: false,
+          success: function (d) {
+            console.info("[msg91] verified", d);
+            var token = d && (d.message || d.token || d["access-token"]);
+            if (token) resolve(token); else reject(new Error("MSG91 returned no token."));
+          },
+          failure: function (e) {
+            console.warn("[msg91] failure", e);
+            reject(new Error(msgOf(e) || "Verification failed."));
+          },
+        });
+      });
+    });
+  }
+  function loadOtpWidget() {
+    if (otpReady) return otpReady;
+    otpReady = loadOtpScript().then(function () { return new Promise(function (resolve, reject) {
         try {
           window.initSendOTP({
             widgetId: CONFIG.MSG91_WIDGET_ID,
@@ -54,10 +92,7 @@
           if (++tries > 50) return reject(new Error("MSG91 widget did not initialise. Check the Widget ID and Token."));
           setTimeout(wait, 100);
         })();
-      };
-      s.onerror = function () { reject(new Error("Could not load the MSG91 widget script (blocked by an ad-blocker or network?).")); };
-      document.head.appendChild(s);
-    });
+    }); });
     otpReady.catch(function () { otpReady = null; });
     return otpReady;
   }
@@ -68,25 +103,34 @@
     if (!cap) { cap = document.createElement("div"); cap.id = "msg91-captcha"; cap.className = "otp-captcha"; }
     // Only move it before the widget has drawn into it (moving a drawn captcha breaks it)
     if (!captchaHome || !cap.hasChildNodes()) {
-      var btn = form.querySelector("button");
-      if (cap.parentNode !== form) form.insertBefore(cap, btn);
+      var anchor = form.querySelector("[role=alert]") || form.querySelector("button");
+      if (cap.parentNode !== form) form.insertBefore(cap, anchor);
       captchaHome = form;
     }
     return cap;
   }
   function captchaNeeded() { return typeof window.isCaptchaVerified === "function" && !window.isCaptchaVerified(); }
-  // Resolves once the visitor has ticked the captcha (or at once if the widget has no captcha)
+  // Resolves once the visitor has ticked the captcha (or at once if the widget has no captcha).
+  // If the widget reports a captcha but never draws one, we stop waiting after 5 s and let
+  // MSG91 answer the send request, so its real error message reaches the visitor.
   function waitForCaptcha(form, onWaiting) {
     return new Promise(function (resolve, reject) {
       if (!captchaNeeded()) return resolve();
       var cap = captchaBox(form);
-      onWaiting(captchaHome === form
-        ? "Tick the security check above to get your OTP."
-        : "Tick the security check in the form where it appears, then press the button there.");
-      cap.scrollIntoView({ behavior: "smooth", block: "center" });
       var waited = 0;
       (function poll() {
         if (!captchaNeeded()) return resolve();
+        var drawn = cap.hasChildNodes();
+        if (!drawn && waited >= 5000) {
+          console.warn("[msg91] widget says captcha is required but did not render one — trying to send anyway. Turn captcha off in the MSG91 widget settings.");
+          return resolve();
+        }
+        if (drawn) {
+          onWaiting(captchaHome === form
+            ? "Tick the security check above to get your OTP."
+            : "Tick the security check in the form where it appears, then press the button there.");
+          if (waited === 0) cap.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
         if ((waited += 400) > 180000) return reject(new Error("The security check timed out. Please try again."));
         setTimeout(poll, 400);
       })();
@@ -130,7 +174,9 @@
           });
         }, function (e) {
           console.warn("[msg91] sendOtp failed", e);
-          reject(new Error(msgOf(e) || "MSG91 did not send the OTP."));
+          var m = msgOf(e) || "MSG91 did not send the OTP.";
+          if (/captcha/i.test(m)) m += " (Turn captcha off in MSG91 → OTP → Widget settings.)";
+          reject(new Error(m));
         });
       });
       });
@@ -155,6 +201,7 @@
       // so any security check is already on screen before they press the button.
       form.addEventListener("focusin", function () {
         if (!otpEnabled()) return;
+        if (CONFIG.MSG91_MODE === "popup") { loadOtpScript().catch(function () {}); return; }
         captchaBox(form);
         loadOtpWidget().catch(function (e) { console.warn("[msg91] preload failed", e); });
       }, { once: true });
@@ -206,7 +253,7 @@
         };
         if (otpEnabled()) {
           btn.textContent = "Sending OTP…";
-          runOtp(form, phone, setNote).then(send).catch(function (e) {
+          (CONFIG.MSG91_MODE === "popup" ? runOtpPopup(phone, setNote) : runOtp(form, phone, setNote)).then(function (t) { setNote(""); send(t); }).catch(function (e) {
             setNote("");
             btn.disabled = false;
             btn.textContent = "Verify mobile & continue";
