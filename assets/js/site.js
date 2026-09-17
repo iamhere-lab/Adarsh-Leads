@@ -8,7 +8,7 @@
 
   var CONFIG = {
     // Google Apps Script web-app URL (see docs/apps-script-lead-webhook.gs)
-    LEAD_WEBHOOK_URL: "",
+    LEAD_WEBHOOK_URL: "https://script.google.com/macros/s/AKfycbwcvCjzoXzMXK6iqnyzMqIjJJkdEjlk2FcBqCSZfiPcImDB681Zh-QwQ2HVNSe8pBFxGg/exec",
     // MSG91 OTP widget (MSG91 dashboard → OTP → Widget). Leave blank to skip OTP.
     // Both values are safe to publish: the secret authkey stays in Apps Script.
     MSG91_WIDGET_ID: "366971686f50373435313031",
